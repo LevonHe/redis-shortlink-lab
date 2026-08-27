@@ -1,0 +1,28 @@
+{
+  "name": "redis-shortlink-lab",
+  "version": "1.0.0",
+  "description": "A hands-on Redis learning project built with Node.js, featuring URL shortening, rate limiting, real-time rankings, and Redis Streams.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LevonHe/redis-shortlink-lab.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/LevonHe/redis-shortlink-lab/issues"
+  },
+  "homepage": "https://github.com/LevonHe/redis-shortlink-lab#readme",
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
