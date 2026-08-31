@@ -89,7 +89,7 @@ async function checkRedisRateLimit(clientIp: string): Promise<boolean> {
     const count = await redisClient.incr(key)
 
     if (count === 1) {
-        await redisClient.expire(key , 1)
+        await redisClient.expire(key , RATE_LIMIT_WINDOW_SECONDS)
     }
 
     return count <= RATE_LIMIT_MAX_REQUESTS
@@ -308,7 +308,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             }
 
             const clientIp = getClientIp(req)
-            if (!checkLocalRateLimit(clientIp)) {
+            // if (!checkLocalRateLimit(clientIp)) {
+            if (!(await checkRedisRateLimit(clientIp))) {
                 sendJson(res, 429, { error: "Too Many Requests" })
                 return
             }
