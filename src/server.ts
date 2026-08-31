@@ -4,6 +4,7 @@ import { createRateLimiter } from "./rate-limit"
 import { createShortLink, getShortLink, incrementClickCount } from "./short-link/service"
 import { getRanking, incrementRankingScore } from "./ranking/service"
 import { MAX_BODY_BYTES, RANKING_LIMIT, SHORT_URL_TTL_SECONDS } from "./config"
+import { publishAccessEvent } from "./access-events/producer"
 
 const port = Number(process.env.PORT ?? 3003)
 
@@ -174,6 +175,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
             // phase 3 重点：如果 HINCRBY 成功，ZINCRBY 失败，Hash 中的点击数和排行榜 score 就不一致了
             await incrementRankingScore(code)
+
+            await publishAccessEvent({ code, clientIp, target: shortLink.target, accessedAt: new Date().toISOString() })
 
             redirect(res, shortLink.target)
             return
