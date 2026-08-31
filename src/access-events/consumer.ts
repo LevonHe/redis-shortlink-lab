@@ -1,8 +1,44 @@
-import { ACCESS_EVENTS_CLAIM_BATCH_SIZE, ACCESS_EVENTS_CLAIM_MIN_IDLE_MS, ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_STREAM_KEY } from "../config"
+import { ACCESS_EVENTS_CLAIM_BATCH_SIZE, ACCESS_EVENTS_CLAIM_MIN_IDLE_MS, ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_DEAD_LETTER_STREAM_KEY, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_MAX_DELIVERIES, ACCESS_EVENTS_STREAM_KEY } from "../config"
 import { connectRedis, disconnectRedis, redisClient } from "../redis"
 import type { StreamMessage } from "./types"
 
 let isShuttingDown = false
+
+async function getDeliveryCount(id: string): Promise<number | null> {
+    const entries = await redisClient.xPendingRange(ACCESS_EVENTS_STREAM_KEY, ACCESS_EVENTS_GROUP, id, id, 1)
+    const entry = entries[0]
+    if (!entry || entry.id !== id) return null
+    return entry.deliveriesCounter
+}
+
+async function moveToDeadLetter(id: string, message: Record<string, string>, error: unknown, deliveries: number): Promise<void> {
+    const reason = error instanceof Error ? error.message : String(error)
+
+    const deadLetterId = await redisClient.xAdd(ACCESS_EVENTS_DEAD_LETTER_STREAM_KEY, "*", { original_id: id, original_payload: JSON.stringify(message), reason, deliveries: String(deliveries), failed_at: new Date().toISOString() })
+    const acknowledged = await redisClient.xAck(ACCESS_EVENTS_STREAM_KEY, ACCESS_EVENTS_GROUP, id)
+
+    if (acknowledged !== 1) {
+        console.warn("Dead letter written but source was not acknowledged", { id, deadLetterId })
+        return
+    }
+
+    console.warn("Moved access event to dead letter", { id, deadLetterId, deliveries })
+}
+
+async function handleProcessingFailure(id: string, message: Record<string, string>, error: unknown): Promise<void> {
+    const deliveries = await getDeliveryCount(id)
+    if (deliveries === null) {
+        console.error("Pending entry not found after processing failure", { id, error })
+        return
+    }
+
+    if (deliveries < ACCESS_EVENTS_MAX_DELIVERIES) {
+        console.error("Access event will remain pending", { id, deliveries, error })
+        return
+    }
+
+    await moveToDeadLetter(id, message, error, deliveries)
+}
 
 async function recoverPendingMessages(): Promise<void> {
     let startId = "0-0"
@@ -44,7 +80,7 @@ async function handleMessage(id: string, message: Record<string, string>): Promi
     try {
         await processAccessEvent({ id, message })
     } catch (error) {
-        console.error("Failed to process access event", { id, error })
+        await handleProcessingFailure(id, message, error)
         return
     }
 
@@ -112,11 +148,9 @@ async function run(): Promise<void> {
         console.log(`Consumer ${ACCESS_EVENTS_CONSUMER} is running`)
 
         // 在读取新消息前恢复
-        // 当前先采用“消费者启动时恢复一次”的策略
-        // 它的限制是：消费者长期运行期间，如果其他消费者宕机，其 Pending 不会立即被接管，必须等当前消费者重启。后续可以改成每隔一段时间恢复一次
-        await recoverPendingMessages()
-
-        while(!isShuttingDown) {
+        while (!isShuttingDown) {
+            await recoverPendingMessages()
+            if (isShuttingDown) break
             await readNewMessages()
         }
     } finally {

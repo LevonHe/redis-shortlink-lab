@@ -83,3 +83,26 @@ nextId 用于分批扫描，0-0 表示本轮完成；
 旧消费者不会因消息被接管而自动删除；
 失败消息可能被不断接管，因此需要最大重试次数和死信机制；
 Stream 消息被裁剪后，PEL 可能短暂保留无消息体的 ID。
+
+delivery count 包含首次投递；
+不 ACK 只会保留 Pending，周期恢复才产生重试；
+达到最大投递次数后写入死信 Stream 并 ACK 原消息。
+死信保存 original_id、原始 payload、失败原因和投递次数；
+XACK 不会删除主 Stream 消息；
+简单的 Redis processed key 无法消除业务处理与标记之间的崩溃窗口。
+
+现在故障语义是：
+
+```text
+死信 XADD 失败
+  -> 抛出异常
+  -> 不 ACK 原消息
+  -> 消费者退出，原消息仍在 PEL
+
+死信 XADD 成功、XACK 失败
+  -> 原消息仍在 PEL
+  -> 后续可能产生重复死信
+
+死信 XADD 成功、XACK 成功
+  -> 原消息离开 PEL
+```

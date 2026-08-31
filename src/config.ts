@@ -21,3 +21,7 @@ export const ACCESS_EVENTS_CONSUMER = process.env.ACCESS_EVENTS_CONSUMER ?? "con
 export const ACCESS_EVENTS_CLAIM_MIN_IDLE_MS = 10_000
 // 每次最多尝试接管 10 条
 export const ACCESS_EVENTS_CLAIM_BATCH_SIZE = 10
+
+// 最多处理 3 次，首次投递 + 两次重试
+export const ACCESS_EVENTS_MAX_DELIVERIES = 3
+export const ACCESS_EVENTS_DEAD_LETTER_STREAM_KEY = "shortlink:access-events:dead-letter"
