@@ -1,5 +1,46 @@
 import { ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_STREAM_KEY } from "../config"
 import { connectRedis, disconnectRedis, redisClient } from "../redis"
+import type { StreamMessage } from "./types"
+
+async function processAccessEvent(streamMessage: StreamMessage): Promise<void> {
+    const { id, message } = streamMessage
+
+    const code = message.code
+    const ip = message.ip
+    const target = message.target
+    const accessedAt = message.accessed_at
+
+    if (!code || !ip || !target || !accessedAt) {
+        throw new Error(`Invalid access event: ${id}`)
+    }
+
+    console.log("Processed access event", { id, code, ip, target, accessedAt })
+}
+
+async function handleMessage(id: string, message: Record<string, string>) {
+    try {
+        await processAccessEvent({ id, message })
+    } catch (error) {
+        console.error("Failed to process access event", { id, error })
+        return
+    }
+
+    try {
+        // XACK 返回本次实际确认的消息数量
+        // 1：成功从该组的 PEL 中移除
+        // 0：该消息不在这个组的 PEL 中（可能已经被 ACK、消息 ID 错误、使用了错误的 group、消息尚未投递给这个 group）
+        const acknowledged = await redisClient.xAck(ACCESS_EVENTS_STREAM_KEY, ACCESS_EVENTS_GROUP, id)
+
+        if (acknowledged !== 1) {
+            console.warn("Message was not acknowledged", { id })
+            return
+        }
+
+        console.log("Acknowledged access event", { id })
+    } catch (error) {
+        console.error("Failed to acknowledge access event", { id, error })
+    }
+}
 
 // stream key: shortlink:access-events
 // group:      access-log-writers
@@ -28,7 +69,7 @@ async function readNewMessages(): Promise<void> {
     if (response === null) return
     for (const stream of response) {
         for (const message of stream.messages) {
-            console.log("Received access event", { id: message.id, ...message.message })
+            await handleMessage(message.id, message.message)
         }
     }
 }
