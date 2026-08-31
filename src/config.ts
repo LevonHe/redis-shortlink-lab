@@ -25,3 +25,5 @@ export const ACCESS_EVENTS_CLAIM_BATCH_SIZE = 10
 // 最多处理 3 次，首次投递 + 两次重试
 export const ACCESS_EVENTS_MAX_DELIVERIES = 3
 export const ACCESS_EVENTS_DEAD_LETTER_STREAM_KEY = "shortlink:access-events:dead-letter"
+
+export const ACCESS_EVENTS_DB_PATH = process.env.ACCESS_EVENTS_DB_PATH ?? "data/access-events.db"

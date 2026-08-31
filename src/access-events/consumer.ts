@@ -1,8 +1,11 @@
 import { ACCESS_EVENTS_CLAIM_BATCH_SIZE, ACCESS_EVENTS_CLAIM_MIN_IDLE_MS, ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_DEAD_LETTER_STREAM_KEY, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_MAX_DELIVERIES, ACCESS_EVENTS_STREAM_KEY } from "../config"
 import { connectRedis, disconnectRedis, redisClient } from "../redis"
 import type { StreamMessage } from "./types"
+import { AccessEventStore } from "./store"
 
 let isShuttingDown = false
+
+const accessEventStore = new AccessEventStore()
 
 async function getDeliveryCount(id: string): Promise<number | null> {
     const entries = await redisClient.xPendingRange(ACCESS_EVENTS_STREAM_KEY, ACCESS_EVENTS_GROUP, id, id, 1)
@@ -73,7 +76,9 @@ async function processAccessEvent(streamMessage: StreamMessage): Promise<void> {
         throw new Error(`Invalid access event: ${id}`)
     }
 
-    console.log("Processed access event", { id, code, ip, target, accessedAt })
+    const result = accessEventStore.save({ messageId: id, code, ip, target, accessedAt })
+
+    console.log("Processed access event", { id, result })
 }
 
 async function handleMessage(id: string, message: Record<string, string>): Promise<void> {
@@ -141,20 +146,28 @@ function requestShutdown(): void {
 }
 
 async function run(): Promise<void> {
-    await connectRedis()
-
     try {
+        await connectRedis()
         await ensureConsumerGroup()
         console.log(`Consumer ${ACCESS_EVENTS_CONSUMER} is running`)
 
         // 在读取新消息前恢复
         while (!isShuttingDown) {
             await recoverPendingMessages()
-            if (isShuttingDown) break
+
+            if (isShuttingDown) {
+                break
+            }
+            
             await readNewMessages()
         }
     } finally {
-        await disconnectRedis()
+        try {
+            await disconnectRedis()
+        } finally {
+            accessEventStore.close()
+        }
+        
     }
 }
 

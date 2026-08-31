@@ -106,3 +106,10 @@ XACK 不会删除主 Stream 消息；
 死信 XADD 成功、XACK 成功
   -> 原消息离开 PEL
 ```
+
+Stream message ID 用作 SQLite 幂等键；
+PRIMARY KEY 防止重复插入；
+duplicate 仍属于处理成功，可以继续 ACK；
+数据库写入必须发生在 XACK 之前；
+写入成功但 ACK 失败时，重新投递不会产生重复行；
+这实现的是幂等效果，不是跨 Redis 和 SQLite 的 exactly-once。
