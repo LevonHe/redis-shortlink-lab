@@ -6,8 +6,10 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node --env-file=.env --import=tsx --watch src/server.ts",
+    "consumer": "node --env-file=.env --import=tsx src/access-events/consumer.ts",
     "build": "tsc",
-    "start": "node --env-file=.env dist/server.js"
+    "start": "node --env-file=.env dist/server.js",
+    "start:consumer": "node --env-file=.env dist/access-events/consumer.js"
   },
   "repository": {
     "type": "git",
