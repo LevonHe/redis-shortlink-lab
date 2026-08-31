@@ -268,10 +268,10 @@ XRANGE shortlink:access-events:dead-letter - +
 | --- | --- | --- |
 | `local` | Node.js `Map` | 单进程有效；重启丢失；不支持多实例共享 |
 | `redis` | `INCR` + `EXPIRE` | 多实例共享，但两个命令之间存在崩溃窗口 |
-| `lua` | Redis Lua | 原子完成计数、首次设置 TTL 和阈值判断；默认策略 |
+| `lua` | Redis Lua | 原子完成计数、首次设置 TTL 和阈值判断 |
 | `sliding` | Lua + ZSet | 精确滑动窗口，每个已通过请求保存一个 member |
 
-当前算法是固定窗口：同一 IP 每秒最多通过 5 次请求。Lua 解决了多命令原子性，但没有解决窗口边界突发问题。
+local、redis、lua 使用固定窗口：同一 IP 每秒最多通过 5 次请求。Lua 解决了多命令原子性，但没有解决窗口边界突发问题。
 
 ## Stream 消费语义
 
