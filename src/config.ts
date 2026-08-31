@@ -16,3 +16,8 @@ export const ACCESS_EVENTS_MAX_LENGTH = 10_000 // 避免实验运行久了之后
 
 export const ACCESS_EVENTS_GROUP = "access-log-writers"
 export const ACCESS_EVENTS_CONSUMER = process.env.ACCESS_EVENTS_CONSUMER ?? "consumer-1"
+
+// Pending 消息至少空闲 10 秒才允许接管
+export const ACCESS_EVENTS_CLAIM_MIN_IDLE_MS = 10_000
+// 每次最多尝试接管 10 条
+export const ACCESS_EVENTS_CLAIM_BATCH_SIZE = 10

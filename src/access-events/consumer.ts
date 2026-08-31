@@ -1,6 +1,29 @@
-import { ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_STREAM_KEY } from "../config"
+import { ACCESS_EVENTS_CLAIM_BATCH_SIZE, ACCESS_EVENTS_CLAIM_MIN_IDLE_MS, ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_STREAM_KEY } from "../config"
 import { connectRedis, disconnectRedis, redisClient } from "../redis"
 import type { StreamMessage } from "./types"
+
+let isShuttingDown = false
+
+async function recoverPendingMessages(): Promise<void> {
+    let startId = "0-0"
+
+    do {
+        // nextId：下一轮扫描的起点
+        // messages：成功接管的消息
+        // deletedMessages：仍存在于 PEL，但消息本体已被裁剪或删除的 ID
+        // nextId === "0-0"：本轮扫描完成
+        const result = await redisClient.xAutoClaim(ACCESS_EVENTS_STREAM_KEY, ACCESS_EVENTS_GROUP, ACCESS_EVENTS_CONSUMER, ACCESS_EVENTS_CLAIM_MIN_IDLE_MS, startId, { COUNT: ACCESS_EVENTS_CLAIM_BATCH_SIZE })
+        for (const message of result.messages) {
+            if (message === null) continue
+            console.log("Claimed pending access event", { id: message.id, consumer: ACCESS_EVENTS_CONSUMER })
+            await handleMessage(message.id, message.message)
+        }
+        if (result.deletedMessages.length > 0) {
+            console.warn("Removed deleted messages from PEL", { ids: result.deletedMessages })
+        }
+        startId = result.nextId
+    } while (startId !== "0-0" && !isShuttingDown)
+}
 
 async function processAccessEvent(streamMessage: StreamMessage): Promise<void> {
     const { id, message } = streamMessage
@@ -17,7 +40,7 @@ async function processAccessEvent(streamMessage: StreamMessage): Promise<void> {
     console.log("Processed access event", { id, code, ip, target, accessedAt })
 }
 
-async function handleMessage(id: string, message: Record<string, string>) {
+async function handleMessage(id: string, message: Record<string, string>): Promise<void> {
     try {
         await processAccessEvent({ id, message })
     } catch (error) {
@@ -74,8 +97,6 @@ async function readNewMessages(): Promise<void> {
     }
 }
 
-let isShuttingDown = false
-
 function requestShutdown(): void {
     if (isShuttingDown) return
 
@@ -89,6 +110,11 @@ async function run(): Promise<void> {
     try {
         await ensureConsumerGroup()
         console.log(`Consumer ${ACCESS_EVENTS_CONSUMER} is running`)
+
+        // 在读取新消息前恢复
+        // 当前先采用“消费者启动时恢复一次”的策略
+        // 它的限制是：消费者长期运行期间，如果其他消费者宕机，其 Pending 不会立即被接管，必须等当前消费者重启。后续可以改成每隔一段时间恢复一次
+        await recoverPendingMessages()
 
         while(!isShuttingDown) {
             await readNewMessages()
