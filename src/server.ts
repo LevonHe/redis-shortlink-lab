@@ -1,106 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
-import { randomBytes } from "node:crypto"
 import { connectRedis, disconnectRedis, redisClient } from "./redis"
+import { createRateLimiter } from "./rate-limit"
+import { createShortLink, getShortLink, incrementClickCount } from "./short-link/service"
+import { getRanking, incrementRankingScore } from "./ranking/service"
+import { MAX_BODY_BYTES, RANKING_LIMIT, SHORT_URL_TTL_SECONDS } from "./config"
 
 const port = Number(process.env.PORT ?? 3003)
 
-// crypto.randomBytes() 生成随机短码
-// 请求体限制为 10kb，避免客户端无限发送数据占用内存
-// 最多尝试 5 次短码，防止碰撞时无限循环
-const SHORT_CODE_LENGTH = 6
-const SHORT_URL_TTL_SECONDS = 24 * 60 * 60
-const MAX_BODY_BYTES = 10 * 1024
-const MAX_CODE_ATTEMPTS = 5
-const CODE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-type ShortLink = {
-    target: string
-    createdAt: string
-    clickCount: number
-}
-
-type RankingItem = {
-    code: string
-    score: number
-}
-
-type RateLimitRecord = {
-    count: number
-    windowStart: number
-}
-
-const RANKING_KEY = "shortlink:ranking"
-const RANKING_LIMIT = 10
-
-const rateLimitStore = new Map<string, RateLimitRecord>()
-
-const RATE_LIMIT_MAX_REQUESTS = 5
-const RATE_LIMIT_WINDOW_MS = 1000
-
-const RATE_LIMIT_SCRIPT = `
-local current = redis.call("INCR", KEYS[1])
-
-if current == 1 then
-  redis.call("EXPIRE", KEYS[1], ARGV[2])
-end
-
-if current > tonumber(ARGV[1]) then
-  return 0
-end
-
-return 1
-`
-
-const RATE_LIMIT_WINDOW_SECONDS = 1
-
-async function incrementRankingScore(code: string): Promise<number> {
-    return redisClient.zIncrBy(RANKING_KEY, 1, code)
-}
-
-async function getRanking(limit: number): Promise<RankingItem[]> {
-    const entries = await redisClient.zRangeWithScores(RANKING_KEY, 0, limit - 1, { REV: true })
-    return entries.map((entry) => ({ code: entry.value, score: entry.score }))
-}
-
-function checkLocalRateLimit(clientIp: string): boolean {
-    const now = Date.now()
-    const record = rateLimitStore.get(clientIp)
-
-    if (!record || now - record.windowStart >= RATE_LIMIT_WINDOW_MS) {
-        rateLimitStore.set(clientIp, { count: 1, windowStart: now })
-        return true
-    }
-
-    if (record.count >= RATE_LIMIT_MAX_REQUESTS) return false
-
-    record.count += 1
-    return true
-}
+const rateLimiter = createRateLimiter(process.env.RATE_LIMIT_STRATEGY ?? "lua")
 
 function getClientIp(req: IncomingMessage): string {
     return req.socket.remoteAddress ?? "unknown"
-}
-
-async function checkRedisRateLimit(clientIp: string): Promise<boolean> {
-    const key = `shortlink:rate:${clientIp}`
-    const count = await redisClient.incr(key)
-
-    if (count === 1) {
-        await redisClient.expire(key , RATE_LIMIT_WINDOW_SECONDS)
-    }
-
-    return count <= RATE_LIMIT_MAX_REQUESTS
-}
-
-async function checkLuaRateLimit(clientIp: string): Promise<boolean> {
-    const key = `shortlink:rate:${clientIp}`
-
-    const result = await redisClient.eval(RATE_LIMIT_SCRIPT, {
-        keys: [key],
-        arguments: [String(RATE_LIMIT_MAX_REQUESTS), String(RATE_LIMIT_WINDOW_SECONDS)]
-    })
-
-    return result === 1
 }
 
 // Node.js 原生 HTTP 不会自动解析 JSON，请求体通过多个数据块达到，需要收集这些数据块
@@ -139,44 +49,6 @@ function parseTargetUrl(body: unknown): string | null {
     }
 }
 
-function generateShortCode(length = SHORT_CODE_LENGTH): string {
-    const bytes = randomBytes(length)
-    let code = ''
-    for (const byte of bytes) {
-        code += CODE_ALPHABET[byte % CODE_ALPHABET.length]
-    }
-    return code
-}
-
-async function createShortLink(targetUrl: string): Promise<string> {
-    for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt += 1) {
-        const code = generateShortCode()
-        const key = `shortlink:url:${code}`
-
-        const exists = await redisClient.exists(key)
-
-        if (exists === 1) continue
-
-        const transaction = redisClient.multi()
-
-        transaction.hSet(key, {
-            target: targetUrl,
-            created_at: new Date().toISOString(),
-            click_count: "0"
-        })
-
-        transaction.expire(key, SHORT_URL_TTL_SECONDS)
-
-        const results = await transaction.exec()
-
-        if (results === null) continue
-
-        return code
-    }
-
-    throw new Error("SHORT_CODE_COLLISION")
-}
-
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
     res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" })
     res.end(JSON.stringify(body))
@@ -185,22 +57,6 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown): void 
 function redirect(res: ServerResponse, location: string): void {
     res.writeHead(302, { location })
     res.end()
-}
-
-async function getShortLink(code: string): Promise<ShortLink | null> {
-    const key = `shortlink:url:${code}`
-    const values = await redisClient.hmGet(key, ["target", "created_at", "click_count"])
-    const [target, createdAt, clickCount] = values
-    if (!target || !createdAt || clickCount === null) return null
-    const parsedClickCount = Number(clickCount)
-    if (!Number.isInteger(parsedClickCount) || parsedClickCount < 0) return null
-    return { target, createdAt, clickCount: parsedClickCount }
-}
-
-async function incrementClickCount(code: string): Promise<number | null> {
-    const key = `shortlink:url:${code}`
-    if (!(await redisClient.exists(key))) return null
-    return redisClient.hIncrBy(key, "click_count", 1)
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -305,9 +161,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             }
 
             const clientIp = getClientIp(req)
-            // if (!checkLocalRateLimit(clientIp)) {
-            // if (!(await checkRedisRateLimit(clientIp))) {
-            if (!(await checkLuaRateLimit(clientIp))) {
+            if (!(await rateLimiter.check(clientIp))) {
                 sendJson(res, 429, { error: "Too Many Requests" })
                 return
             }
