@@ -1,7 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { randomBytes } from "node:crypto"
 import { connectRedis, disconnectRedis, redisClient } from "./redis"
-// import { readFile } from "node:fs/promises"
 
 const port = Number(process.env.PORT ?? 3003)
 
@@ -53,8 +52,6 @@ return 1
 `
 
 const RATE_LIMIT_WINDOW_SECONDS = 1
-
-// const readLimitScript = await readFile(new URL("./scripts/rate-limit.lua", import.meta.url),"utf-8")
 
 async function incrementRankingScore(code: string): Promise<number> {
     return redisClient.zIncrBy(RANKING_KEY, 1, code)
@@ -309,7 +306,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
             const clientIp = getClientIp(req)
             // if (!checkLocalRateLimit(clientIp)) {
-            if (!(await checkRedisRateLimit(clientIp))) {
+            // if (!(await checkRedisRateLimit(clientIp))) {
+            if (!(await checkLuaRateLimit(clientIp))) {
                 sendJson(res, 429, { error: "Too Many Requests" })
                 return
             }
