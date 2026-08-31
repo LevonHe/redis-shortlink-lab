@@ -19,6 +19,23 @@ type ShortLink = {
     clickCount: number
 }
 
+type RankingItem = {
+    code: string
+    score: number
+}
+
+const RANKING_KEY = "shortlink:ranking"
+const RANKING_LIMIT = 10
+
+async function incrementRankingScore(code: string): Promise<number> {
+    return redisClient.zIncrBy(RANKING_KEY, 1, code)
+}
+
+async function getRanking(limit: number): Promise<RankingItem[]> {
+    const entries = await redisClient.zRangeWithScores(RANKING_KEY, 0, limit - 1, { REV: true })
+    return entries.map((entry) => ({ code: entry.value, score: entry.score }))
+}
+
 // Node.js 原生 HTTP 不会自动解析 JSON，请求体通过多个数据块达到，需要收集这些数据块
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = []
@@ -122,6 +139,7 @@ async function incrementClickCount(code: string): Promise<number | null> {
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`)
 
+    // /health
     if (req.method === "GET" && requestUrl.pathname === "/health") {
         if (!redisClient.isReady) {
             sendJson(res, 503, { status: "unavailable", redis: "disconnected" })
@@ -136,6 +154,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
     }
 
+    // /shorten
     if (req.method === "POST" && requestUrl.pathname === "/shorten") {
         if (req.headers['content-type']?.split(";")[0] !== "application/json") {
             sendJson(res, 415, { error: "Content-Type must be application/json" })
@@ -176,6 +195,37 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
     }
 
+    // /ranking
+    if (req.method === "GET" && requestUrl.pathname === "/ranking") {
+        try {
+            const ranking = await getRanking(RANKING_LIMIT)
+            sendJson(res, 200, { items: ranking })
+        } catch (error) {
+            console.error("Failed to get ranking:", error)
+            sendJson(res, 503, { error: "Ranking is unavailable" })
+        }
+        return
+    }
+
+    // /links/:code
+    if (req.method === "GET") {
+        const match = requestUrl.pathname.match(/^\/links\/([0-9A-Za-z]{6})$/)
+
+        if (match) {
+            const code = match[1]
+            const shortLink = await getShortLink(code)
+
+            if (!shortLink) {
+                sendJson(res, 404, { error: "Short link not found or expired" })
+                return
+            }
+
+            sendJson(res, 200, { code, ...shortLink })
+            return
+        }
+    }
+
+    // /:code
     if (req.method === "GET") {
         const match = requestUrl.pathname.match(/^\/([0-9A-Za-z]{6})$/)
 
@@ -194,28 +244,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
                 return
             }
 
+            // phase 3 重点：如果 HINCRBY 成功，ZINCRBY 失败，Hash 中的点击数和排行榜 score 就不一致了
+            await incrementRankingScore(code)
             redirect(res, shortLink.target)
             return
         }
     }
 
-    if (req.method === "GET") {
-        const match = requestUrl.pathname.match(/^\/links\/([0-9A-Za-z]{6})$/)
-
-        if (match) {
-            const code = match[1]
-            const shortLink = await getShortLink(code)
-
-            if (!shortLink) {
-                sendJson(res, 404, { error: "Short link not found or expired" })
-                return
-            }
-
-            sendJson(res, 200, { code, ...shortLink })
-            return
-        }
-    }
-
+    // 404
     sendJson(res, 404, { error: "Not Found" })
 }
 
