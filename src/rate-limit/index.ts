@@ -1,5 +1,6 @@
 import { createLocalFixedWindowRateLimiter } from "./local-fixed-window";
 import { createLuaFixedWindowRateLimiter } from "./lua-fixed-window";
+import { createLuaSlidingWindowRateLimiter } from "./lua-sliding-window";
 import { createRedisFixedWindowRateLimiter } from "./redis-fixed-window";
 import { RateLimiter } from "./types";
 
@@ -11,6 +12,8 @@ export function createRateLimiter(strategy: string): RateLimiter {
             return createRedisFixedWindowRateLimiter()
         case "lua":
             return createLuaFixedWindowRateLimiter()
+        case "sliding":
+            return createLuaSlidingWindowRateLimiter()
         default:
             throw new Error(`Unsupported rate limit strategy: ${strategy}`)
     }
