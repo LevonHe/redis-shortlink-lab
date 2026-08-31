@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import { randomBytes } from "node:crypto"
 import { connectRedis, disconnectRedis, redisClient } from "./redis"
+// import { readFile } from "node:fs/promises"
 
 const port = Number(process.env.PORT ?? 3003)
 
@@ -24,8 +25,36 @@ type RankingItem = {
     score: number
 }
 
+type RateLimitRecord = {
+    count: number
+    windowStart: number
+}
+
 const RANKING_KEY = "shortlink:ranking"
 const RANKING_LIMIT = 10
+
+const rateLimitStore = new Map<string, RateLimitRecord>()
+
+const RATE_LIMIT_MAX_REQUESTS = 5
+const RATE_LIMIT_WINDOW_MS = 1000
+
+const RATE_LIMIT_SCRIPT = `
+local current = redis.call("INCR", KEYS[1])
+
+if current == 1 then
+  redis.call("EXPIRE", KEYS[1], ARGV[2])
+end
+
+if current > tonumber(ARGV[1]) then
+  return 0
+end
+
+return 1
+`
+
+const RATE_LIMIT_WINDOW_SECONDS = 1
+
+// const readLimitScript = await readFile(new URL("./scripts/rate-limit.lua", import.meta.url),"utf-8")
 
 async function incrementRankingScore(code: string): Promise<number> {
     return redisClient.zIncrBy(RANKING_KEY, 1, code)
@@ -34,6 +63,47 @@ async function incrementRankingScore(code: string): Promise<number> {
 async function getRanking(limit: number): Promise<RankingItem[]> {
     const entries = await redisClient.zRangeWithScores(RANKING_KEY, 0, limit - 1, { REV: true })
     return entries.map((entry) => ({ code: entry.value, score: entry.score }))
+}
+
+function checkLocalRateLimit(clientIp: string): boolean {
+    const now = Date.now()
+    const record = rateLimitStore.get(clientIp)
+
+    if (!record || now - record.windowStart >= RATE_LIMIT_WINDOW_MS) {
+        rateLimitStore.set(clientIp, { count: 1, windowStart: now })
+        return true
+    }
+
+    if (record.count >= RATE_LIMIT_MAX_REQUESTS) return false
+
+    record.count += 1
+    return true
+}
+
+function getClientIp(req: IncomingMessage): string {
+    return req.socket.remoteAddress ?? "unknown"
+}
+
+async function checkRedisRateLimit(clientIp: string): Promise<boolean> {
+    const key = `shortlink:rate:${clientIp}`
+    const count = await redisClient.incr(key)
+
+    if (count === 1) {
+        await redisClient.expire(key , 1)
+    }
+
+    return count <= RATE_LIMIT_MAX_REQUESTS
+}
+
+async function checkLuaRateLimit(clientIp: string): Promise<boolean> {
+    const key = `shortlink:rate:${clientIp}`
+
+    const result = await redisClient.eval(RATE_LIMIT_SCRIPT, {
+        keys: [key],
+        arguments: [String(RATE_LIMIT_MAX_REQUESTS), String(RATE_LIMIT_WINDOW_SECONDS)]
+    })
+
+    return result === 1
 }
 
 // Node.js 原生 HTTP 不会自动解析 JSON，请求体通过多个数据块达到，需要收集这些数据块
@@ -232,9 +302,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         if (match) {
             const code = match[1]
             const shortLink = await getShortLink(code)
-
             if (!shortLink) {
                 sendJson(res, 404, { error: "Short link not found or expired" })
+                return
+            }
+
+            const clientIp = getClientIp(req)
+            if (!checkLocalRateLimit(clientIp)) {
+                sendJson(res, 429, { error: "Too Many Requests" })
                 return
             }
 
@@ -246,6 +321,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
             // phase 3 重点：如果 HINCRBY 成功，ZINCRBY 失败，Hash 中的点击数和排行榜 score 就不一致了
             await incrementRankingScore(code)
+
             redirect(res, shortLink.target)
             return
         }
