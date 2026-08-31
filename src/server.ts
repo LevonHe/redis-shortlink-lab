@@ -13,6 +13,12 @@ const MAX_BODY_BYTES = 10 * 1024
 const MAX_CODE_ATTEMPTS = 5
 const CODE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
+type ShortLink = {
+    target: string
+    createdAt: string
+    clickCount: number
+}
+
 // Node.js 原生 HTTP 不会自动解析 JSON，请求体通过多个数据块达到，需要收集这些数据块
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const chunks: Buffer[] = []
@@ -58,17 +64,30 @@ function generateShortCode(length = SHORT_CODE_LENGTH): string {
     return code
 }
 
-async function createShortLink(parseTargetUrl: string): Promise<string> {
+async function createShortLink(targetUrl: string): Promise<string> {
     for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt += 1) {
         const code = generateShortCode()
         const key = `shortlink:url:${code}`
 
-        const result = await redisClient.set(key, parseTargetUrl, {
-            NX: true, // 仅当 key 不存在时写入
-            EX: SHORT_URL_TTL_SECONDS // 过期时间
+        const exists = await redisClient.exists(key)
+
+        if (exists === 1) continue
+
+        const transaction = redisClient.multi()
+
+        transaction.hSet(key, {
+            target: targetUrl,
+            created_at: new Date().toISOString(),
+            click_count: "0"
         })
 
-        if (result === "OK") return code
+        transaction.expire(key, SHORT_URL_TTL_SECONDS)
+
+        const results = await transaction.exec()
+
+        if (results === null) continue
+
+        return code
     }
 
     throw new Error("SHORT_CODE_COLLISION")
@@ -82,6 +101,22 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown): void 
 function redirect(res: ServerResponse, location: string): void {
     res.writeHead(302, { location })
     res.end()
+}
+
+async function getShortLink(code: string): Promise<ShortLink | null> {
+    const key = `shortlink:url:${code}`
+    const values = await redisClient.hmGet(key, ["target", "created_at", "click_count"])
+    const [target, createdAt, clickCount] = values
+    if (!target || !createdAt || clickCount === null) return null
+    const parsedClickCount = Number(clickCount)
+    if (!Number.isInteger(parsedClickCount) || parsedClickCount < 0) return null
+    return { target, createdAt, clickCount: parsedClickCount }
+}
+
+async function incrementClickCount(code: string): Promise<number | null> {
+    const key = `shortlink:url:${code}`
+    if (!(await redisClient.exists(key))) return null
+    return redisClient.hIncrBy(key, "click_count", 1)
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -146,14 +181,37 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
         if (match) {
             const code = match[1]
-            const targetUrl = await redisClient.get(`shortlink:url:${code}`)
+            const shortLink = await getShortLink(code)
 
-            if (!targetUrl) {
+            if (!shortLink) {
                 sendJson(res, 404, { error: "Short link not found or expired" })
                 return
             }
 
-            redirect(res, targetUrl)
+            const clickCount = await incrementClickCount(code)
+            if (clickCount === null) {
+                sendJson(res, 404, { error: "Short link not found or expired" })
+                return
+            }
+
+            redirect(res, shortLink.target)
+            return
+        }
+    }
+
+    if (req.method === "GET") {
+        const match = requestUrl.pathname.match(/^\/links\/([0-9A-Za-z]{6})$/)
+
+        if (match) {
+            const code = match[1]
+            const shortLink = await getShortLink(code)
+
+            if (!shortLink) {
+                sendJson(res, 404, { error: "Short link not found or expired" })
+                return
+            }
+
+            sendJson(res, 200, { code, ...shortLink })
             return
         }
     }
